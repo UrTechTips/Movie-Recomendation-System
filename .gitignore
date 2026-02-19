@@ -1,0 +1,13 @@
+# Ignore the MovieLens 1M dataset files
+/ml-1m
+/ml-1m/*
+
+# Ignore any compressed files that may be generated
+*.zip
+*.tar.gz
+
+# Ignore the README file in the ml-latest-small dataset
+/ml-latest-small/README.txt
+
+*.ipynb
+TMDB_movie_dataset_v11.csv
