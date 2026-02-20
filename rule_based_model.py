@@ -1,102 +1,224 @@
 import re
 import pandas as pd
+import numpy as np
+from difflib import get_close_matches
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-def compute_tfidf(dataset):
-    dataset['overview'] = dataset['overview'].fillna('')
-    tfidf_vectorizer = TfidfVectorizer(stop_words='english')
-    tfidf_matrix = tfidf_vectorizer.fit_transform(dataset['overview'])
+# ---- DISPLAY (UNCHANGED) ----
+pd.options.display.float_format = '{:.3f}'.format
+pd.set_option('display.max_colwidth', None)
+pd.set_option('display.width', 200)
 
-    cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
-    indices = pd.Series(dataset.index, index=dataset['title'].str.lower()).drop_duplicates()
-    return cosine_sim, indices
 
+# =====================================================
+# TF-IDF SIMILARITY
+# =====================================================
+def compute_tfidf(df):
+    df['overview'] = df['overview'].fillna('')
+    tfidf = TfidfVectorizer(stop_words='english', max_features=6000, ngram_range=(1,2))
+    mat = tfidf.fit_transform(df['overview'])
+    sim = cosine_similarity(mat, mat)
+    idx = pd.Series(df.index, index=df['title'].str.lower()).drop_duplicates()
+    return sim, idx
+
+
+# =====================================================
+# LOAD DATA
+# =====================================================
 def load_dataset(path):
-    try:
-        dataset = pd.read_csv(path)
-        cosine, indices = compute_tfidf(dataset)
-        return dataset, cosine, indices
-    except Exception as e:
-        print(f"Error loading dataset: {e}")
-        return None, None, None
 
-def create_time_fit(available_time_fit, dataset):
-    fittable_movies = dataset[dataset['runtime'] <= available_time_fit].copy()
-    # Simplified math
-    fittable_movies['time_fit'] = fittable_movies['runtime'] / available_time_fit 
-    return fittable_movies # Removed redundant sort
+    df = pd.read_csv(path)
 
-def add_genre_score(df, preferred_genre):
-    # Vectorized string matching
-    df['genre_match'] = df['genres'].str.contains(preferred_genre, case=False, na=False).astype(int) 
-    return df
+    df.fillna({
+        'runtime':0,'genres':'','overview':'',
+        'popularity_norm':0,'vote_average_norm':0,
+        'vote_count_norm':0,'overview_length':0
+    }, inplace=True)
 
-def recomend(dataset, cosine_sim, indices, **kwargs):
-    user_input = {
-        "available_time_fit": kwargs.get("available_time_fit", 120),
-        "top_k": kwargs.get("top_k", 10),
-        "preferred_genre": kwargs.get("preferred_genre", "Action"),
-        "preferred_movie": kwargs.get("preferred_movie", None)
-    }
-    
-    dataset = create_time_fit(user_input['available_time_fit'], dataset)
-    dataset = add_genre_score(dataset, preferred_genre=user_input['preferred_genre'])
-    
-    if user_input['preferred_movie']:
-        if user_input['preferred_movie'].lower() not in indices:
-            print(f"Preferred movie '{user_input['preferred_movie']}' not found in dataset. Ignoring similarity feature.")
-            dataset['similarity'] = 0
-        else:
-            idx = indices[user_input['preferred_movie'].lower()]
-            print("DEBUG: Similarity scores for '{}': {}".format(user_input['preferred_movie'], cosine_sim[idx]))
-            dataset['similarity'] = dataset.index.map(lambda x: cosine_sim[idx][x])
-    else:
-        dataset['similarity'] = 0
+    C = df['vote_average_norm'].mean()
+    m = df['vote_count_norm'].quantile(0.6)
 
-    dataset['score'] = (0.3 * dataset['vote_average_norm']) + \
-                        (0.1 * dataset['popularity_norm']) + \
-                        (0.1 * dataset['time_fit']) + \
-                        (0.1 * dataset['vote_count_norm']) + \
-                        (0.1 * dataset['genre_match']) + \
-                        (0.3 * dataset['similarity']) 
-    
-    if user_input['preferred_movie']: # Already watched so score 0
-        dataset.loc[dataset['title'].str.lower() == user_input['preferred_movie'].lower(), 'score'] = 0
-    
-    return dataset[['title', 'genres', 'time_fit', 'similarity', 'score',]]\
-           .sort_values(by='score', ascending=False)\
-           .head(user_input['top_k'])
+    df['weighted_rating'] = (
+        (df['vote_count_norm']/(df['vote_count_norm']+m))*df['vote_average_norm']
+        + (m/(df['vote_count_norm']+m))*C
+    )
 
-def parse_user_input(text):
-    time_match = re.search(r'(\d+)\s*(?:minutes|mins|m)', text, re.IGNORECASE)
-    available_time = int(time_match.group(1)) if time_match else 120
+    df['story_quality'] = np.log1p(df['overview_length'])
+    df['story_quality'] /= df['story_quality'].max() if df['story_quality'].max()!=0 else 1
 
-    k_match = re.search(r'(\d+)\s*(?:\w+\s+)*movies', text, re.IGNORECASE)
-    top_k = int(k_match.group(1)) if k_match else 5
+    df['rating_confidence'] = np.sqrt(df['vote_count_norm'])
 
-    prefered_movie = re.search(r'(?:liked|loved)\s+(?:the\s+)?(["\'])(.*?)(?:\1)', text, re.IGNORECASE)
-    prefered_movie = prefered_movie.group(2) if prefered_movie else None
+    sim, idx = compute_tfidf(df)
+    return df, sim, idx
+
+
+# =====================================================
+# MULTI MOVIE EXTRACTOR
+# =====================================================
+def extract_movies_from_text(text):
+
+    text = text.lower()
+
+    patterns = [
+        r'liked\s+(.*)',
+        r'loved\s+(.*)',
+        r'watched\s+(.*)',
+        r'story of\s+(.*)',
+        r'about\s+(.*)',
+        r'details of\s+(.*)',
+        r'summary of\s+(.*)'
+    ]
+
+    for p in patterns:
+        m = re.search(p, text)
+        if m:
+            part = m.group(1)
+            movies = re.split(r',| and ', part)
+            return [x.strip() for x in movies if len(x.strip()) > 1]
+
+    return []
+
+
+# =====================================================
+# INTENT
+# =====================================================
+def is_details_query(text):
+    return any(k in text.lower() for k in ["story","plot","details","about","summary","tell me about"])
+
+
+# =====================================================
+# INPUT PARSER
+# =====================================================
+def parse_input(text):
+
+    t = text.lower()
+
+    time = 120
+    if re.search(r'(\d+)\s*hour', t):
+        time = int(re.search(r'(\d+)\s*hour', t).group(1))*60
+    elif re.search(r'(\d+)\s*min', t):
+        time = int(re.search(r'(\d+)\s*min', t).group(1))
+
+    k = int(re.search(r'\b(\d+)\b', t).group(1)) if re.search(r'\b(\d+)\b', t) else 5
+    k = min(k, 20)
+
+    movies = extract_movies_from_text(text)
 
     genres = {'Fantasy', 'Western', 'Romance', 'Crime', 'Comedy', 'TV Movie', 'Adventure', 'Documentary', 'Mystery', 'Family', 'War', 'Thriller', 'Music', 'Drama', 'Animation', 'Science Fiction', 'Action', 'History', 'Horror'}
-    preferred_genre = "Action"
-    for g in genres:
-        if g.lower() in text.lower():
-            preferred_genre = g.capitalize()
-            break
-            
-    return available_time, top_k, preferred_genre, prefered_movie
 
-if __name__ == "__main__":
-    print("Loading dataset and computing similarities...")
-    dataset, cosine_sim, indices = load_dataset("merged_movies_dataset.csv")
-    if dataset is not None:
-        try:
-            # sent = input("Hello! How are you feeling today? \n")
-            sent = "I want to watch a horror movie. I have 150min time. I liked 'the conjuring'."
-            available_time, top_k, preferred_genre, preferred_movie = parse_user_input(sent)
-            print("DEBUG: Parsed user input - Available Time: {}, Top K: {}, Preferred Genre: {}, Preferred Movie: {}".format(available_time, top_k, preferred_genre, preferred_movie))
-            recommendations = recomend(dataset, cosine_sim, indices, available_time_fit=available_time, top_k=top_k, preferred_genre=preferred_genre, preferred_movie=preferred_movie)
-            print(recommendations)    
-        except ValueError:
-            print("Please enter valid numbers for time and recommendations.")
+    genre = next((g.capitalize() for g in genres if g.lower() in t), None)
+
+    lang = "en" if "english" in t else "hi" if "hindi" in t else None
+
+    return time, k, genre, movies, lang
+
+
+# =====================================================
+# SHOW DETAILS
+# =====================================================
+def show_movie_details(df, movie):
+
+    match = get_close_matches(movie.lower(), df['title'].str.lower(), n=1, cutoff=0.6)
+
+    if not match:
+        print("🤖 Sorry, I couldn't find that movie.")
+        return
+
+    row = df[df['title'].str.lower()==match[0]].iloc[0]
+
+    print("\n🎬 Movie Details\n")
+    print(f"Title: {row['title']}")
+    print(f"Genres: {row['genres']}")
+    print(f"Runtime: {row['runtime']} minutes")
+    print(f"Rating: {row['vote_average_norm']}")
+    print(f"Popularity: {row['popularity_norm']}")
+    print("\n📖 Story:\n")
+    print(row['overview'])
+    print("\n"+"-"*80)
+
+
+# =====================================================
+# HYBRID RECOMMENDER (MULTI MOVIE AWARE)
+# =====================================================
+def recommend(df, sim, idx, time_limit, top_k, genre, movies, lang):
+
+    rec_df = df[df['runtime'] <= time_limit].copy()
+    rec_df['runtime_comfort'] = 1 - abs(rec_df['runtime']-time_limit)/time_limit
+
+    if genre:
+        rec_df['genre_match'] = rec_df['genres'].str.contains(genre, case=False).astype(int)
+    else:
+        rec_df['genre_match'] = 0
+
+    if lang:
+        rec_df['lang_match'] = (rec_df['original_language']==lang).astype(int)
+    else:
+        rec_df['lang_match'] = 0
+
+    # ---- MULTI SIMILARITY PROFILE ----
+    sim_vectors = []
+
+    for m in movies:
+        close = get_close_matches(m.lower(), idx.index, n=1, cutoff=0.6)
+        if close:
+            sim_vectors.append(sim[idx[close[0]]])
+
+    if sim_vectors:
+        combined_sim = np.mean(sim_vectors, axis=0)
+        rec_df['similarity'] = combined_sim[rec_df.index]
+    else:
+        rec_df['similarity'] = 0
+
+    if rec_df['similarity'].max() > 0:
+        rec_df['similarity'] = (rec_df['similarity']-rec_df['similarity'].min()) / \
+                               (rec_df['similarity'].max()-rec_df['similarity'].min())
+
+    rec_df['score'] = (
+        0.25*rec_df['weighted_rating'] +
+        0.2*rec_df['similarity'] +
+        0.1*rec_df['popularity_norm'] +   
+        0.07*rec_df['story_quality'] +
+        0.08*rec_df['runtime_comfort'] +
+        0.05*rec_df['rating_confidence'] +
+        0.15*rec_df['lang_match'] + 
+        0.15*rec_df['genre_match']
+    )
+
+    for m in movies:
+        rec_df = rec_df[rec_df['title'].str.lower() != m.lower()]
+
+    return rec_df[['title','genres','runtime',
+                   'similarity','weighted_rating',
+                   'runtime_comfort','rating_confidence','score']]\
+        .sort_values(by='score',ascending=False)\
+        .head(top_k)
+
+
+# =====================================================
+# CHAT LOOP
+# =====================================================
+if __name__=="__main__":
+
+    df, sim, idx = load_dataset("merged_movies_dataset.csv")
+
+    print("\n🎬 Hybrid Movie Assistant Ready!")
+    print("Examples:")
+    print(" i watched john wick, godfather, shawshank redemption")
+    print(" tell me about inside out\n")
+
+    while True:
+        text = input("You: ")
+
+        if text.lower() in ["exit","quit","bye"]:
+            break
+
+        time, k, genre, movies, lang = parse_input(text)
+
+        if is_details_query(text) and movies:
+            show_movie_details(df, movies[0])
+        else:
+            recs = recommend(df, sim, idx, time, k, genre, movies, lang)
+            print("\n🤖 Recommendations:\n")
+            print(recs.to_string(index=False, justify='left'))
+            print("\n"+"-"*80)
