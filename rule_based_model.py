@@ -104,6 +104,7 @@ def parse_input(text):
     k = min(k, 20)
 
     movies = extract_movies_from_text(text)
+    print(f"Extracted movies: {movies}")
 
     genres = {'Fantasy', 'Western', 'Romance', 'Crime', 'Comedy', 'TV Movie', 'Adventure', 'Documentary', 'Mystery', 'Family', 'War', 'Thriller', 'Music', 'Drama', 'Animation', 'Science Fiction', 'Action', 'History', 'Horror'}
 
