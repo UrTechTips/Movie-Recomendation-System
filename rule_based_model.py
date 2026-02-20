@@ -93,7 +93,7 @@ if __name__ == "__main__":
     if dataset is not None:
         try:
             # sent = input("Hello! How are you feeling today? \n")
-            sent = "I want to watch a horror movie. I have 150min time. I liked 'the conjuring'."
+            sent = "Give me 5 movies. I liked 'john wick'"
             available_time, top_k, preferred_genre, preferred_movie = parse_user_input(sent)
             print("DEBUG: Parsed user input - Available Time: {}, Top K: {}, Preferred Genre: {}, Preferred Movie: {}".format(available_time, top_k, preferred_genre, preferred_movie))
             recommendations = recomend(dataset, cosine_sim, indices, available_time_fit=available_time, top_k=top_k, preferred_genre=preferred_genre, preferred_movie=preferred_movie)
